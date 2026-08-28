@@ -1,0 +1,34 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "aws-sap-ecs-logserv-log-forwarder"
+
+[default.build.parameters]
+cached = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = [
+    "Environment=\"\"",
+    "DestBucketName=\"\"",
+    "SourceBucketName=\"\"",
+    "SourceSqsQueueName=\"\"",
+    "SourceAwsAccountId=\"\"",
+    "IncludeCategories=\"\"",
+    "ExcludeSubcategories=\"\"",
+    "MaxFileSizeMB=50",
+    "DestPrefix=logserv/",
+    "Decompress=true",
+    "LogLevel=INFO",
+    "ForwardAWSLogs=true",
+    "BatchSize=10",
+    "BatchWindow=5",
+    "ReservedConcurrency=50",
+    "CreateDestBucket=true",
+    "EmitMetrics=false",
+    "RetentionDays=365",
+    "AllowedPrincipalArns=\"\"",
+    "EnableSQSTrigger=true",
+]

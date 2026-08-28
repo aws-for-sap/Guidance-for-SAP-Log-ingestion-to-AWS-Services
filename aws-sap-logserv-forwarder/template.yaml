@@ -1,0 +1,521 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS SAP ECS LogServ Log Forwarder Lambda
+  Processes S3 event notifications from SQS, applies filtering,
+  and copies qualifying log files to the destination bucket.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: ""
+    Description: Deployment environment (any value accepted, blank for no suffix)
+
+  DestBucketName:
+    Type: String
+    Default: ""
+    Description: Destination S3 bucket for processed logs
+
+  SourceBucketName:
+    Type: String
+    Default: ""
+    Description: Source S3 bucket
+
+  SourceSqsQueueName:
+    Type: String
+    Default: ""
+    Description: >
+      Name of the source SQS queue (as provided by SAP).
+      Example: sap-hec-clz-123456789012-us-east-1-hec45-gto-queue
+
+  SourceAwsAccountId:
+    Type: String
+    Default: ""
+    Description: >
+      AWS account ID of the SAP RISE managed account that owns the source SQS queue and S3 bucket.
+      This is typically embedded in the bucket/queue name (e.g. 123456789012).
+
+  IncludeCategories:
+    Type: String
+    Default: ""
+    Description: >
+      Comma-separated log categories to include. Leave blank to forward all categories (no filtering).
+      Options: abap, dns, hana, linux, sap, scc, webdispatcher, bobj_bi, bobj_bods, bobj_sacagent, sybase, java, windows
+
+  ExcludeSubcategories:
+    Type: String
+    Default: ""
+    Description: >
+      Comma-separated subcategories to exclude.
+      Options: audit, proxy, slapd, etc.
+
+  MaxFileSizeMB:
+    Type: Number
+    Default: 50
+    Description: Maximum file size to process (MB)
+
+  DestPrefix:
+    Type: String
+    Default: "logserv/"
+    Description: Prefix (folder path) for objects written to the destination bucket
+
+  Decompress:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to decompress .gz files before storing in destination
+
+  LogLevel:
+    Type: String
+    Default: "INFO"
+    AllowedValues: ["DEBUG", "INFO", "WARNING", "ERROR"]
+    Description: Lambda function logging level
+
+  ForwardAWSLogs:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to forward AWS infrastructure logs (VPC Flow Logs, ELB, WAF) from the AWSLogs/ prefix
+
+  BatchSize:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 10000
+    Description: Number of SQS messages per Lambda invocation
+
+  BatchWindow:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    MaxValue: 300
+    Description: Maximum batching window in seconds
+
+  ReservedConcurrency:
+    Type: Number
+    Default: 50
+    Description: Reserved concurrent executions for the Lambda
+
+  CreateDestBucket:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to create the destination S3 bucket (set false if it already exists)
+
+  EmitMetrics:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable CloudWatch custom metrics via Embedded Metric Format (adds per-file and batch metrics to SAP/LogServ namespace)
+
+  RetentionDays:
+    Type: Number
+    Default: 365
+    Description: Log retention in days
+
+  AllowedPrincipalArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      IAM role/user ARNs allowed to read from the destination bucket (comma-separated).
+      Use specific role ARNs (e.g. arn:aws:iam::123456789012:role/MyRole) instead of
+      account-root principals for least-privilege cross-account access.
+
+  EnableSQSTrigger:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Whether to create the SQS event source mapping. Set to "false" on FIRST deployment
+      to a new account (creates the IAM role and Lambda without the cross-account SQS trigger),
+      then immediately redeploy with "true" to activate log processing.
+      This two-step process is required because CloudFormation validates cross-account SQS
+      access at deployment time, but the Lambda role must exist first.
+      On subsequent deployments (updates), leave as "true".
+
+  AlarmNotificationTopicArn:
+    Type: String
+    Default: ""
+    Description: >
+      SNS topic ARN for CloudWatch alarm notifications. Leave blank to disable notifications.
+
+  AccessLogBucketName:
+    Type: String
+    Default: ""
+    Description: >
+      S3 bucket name for server access logging on the destination bucket. Leave blank to disable
+      access logging. The target bucket must exist and have a bucket policy granting the S3 logging
+      service (logging.s3.amazonaws.com) PutObject permission.
+
+Conditions:
+  ShouldCreateBucket: !Equals [!Ref CreateDestBucket, "true"]
+  HasEnvironment: !Not [!Equals [!Ref Environment, ""]]
+  HasAllowedAccounts: !Not [!Equals [!Select [0, !Ref AllowedPrincipalArns], ""]]
+  ShouldEnableSQSTrigger: !Equals [!Ref EnableSQSTrigger, "true"]
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmNotificationTopicArn, ""]]
+  HasAccessLogBucket: !Not [!Equals [!Ref AccessLogBucketName, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    Timeout: 300
+    MemorySize: 512
+
+Resources:
+  # Destination S3 Bucket for processed logs
+  LogServDestBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref DestBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetention
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+          - Id: IntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: Private
+      LoggingConfiguration: !If
+        - HasAccessLogBucket
+        - DestinationBucketName: !Ref AccessLogBucketName
+          LogFilePrefix: !Sub "${DestBucketName}-access-logs/"
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: aws-sap-ecs-logserv-log-forwarder
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: LogServ
+
+  # Bucket Policy - allow access from owning account + optional cross-account
+  LogServDestBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: ShouldCreateBucket
+    Properties:
+      Bucket: !Ref LogServDestBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${DestBucketName}"
+              - !Sub "arn:aws:s3:::${DestBucketName}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: DenyOutdatedTLS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${DestBucketName}"
+              - !Sub "arn:aws:s3:::${DestBucketName}/*"
+            Condition:
+              NumericLessThan:
+                s3:TlsVersion: "1.2"
+          - Sid: AllowReadFromOwningAccount
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - s3:GetObject
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${DestBucketName}"
+              - !Sub "arn:aws:s3:::${DestBucketName}/*"
+          - !If
+            - HasAllowedAccounts
+            - Sid: AllowReadFromAllowedPrincipals
+              Effect: Allow
+              Principal:
+                AWS: !Ref AllowedPrincipalArns
+              Action:
+                - s3:GetObject
+                - s3:GetBucketLocation
+                - s3:ListBucket
+              Resource:
+                - !Sub "arn:aws:s3:::${DestBucketName}"
+                - !Sub "arn:aws:s3:::${DestBucketName}/${DestPrefix}*"
+              Condition:
+                Bool:
+                  aws:SecureTransport: "true"
+            - !Ref AWS::NoValue
+
+  # Dead Letter Queue for failed messages
+  LogForwarderDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-dlq-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder-dlq"
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Project
+          Value: aws-sap-ecs-logserv-log-forwarder
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Explicit IAM Role - created independently so it exists before the
+  # EventSourceMapping is validated by CloudFormation on subsequent deploys.
+  LogForwarderExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-role-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SourceBucketReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3ReadSource
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetObjectVersion
+                  - s3:GetLifecycleConfiguration
+                Resource:
+                  - !Sub "arn:aws:s3:::${SourceBucketName}"
+                  - !Sub "arn:aws:s3:::${SourceBucketName}/*"
+        - PolicyName: DestBucketWriteOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3WriteDestination
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${DestBucketName}/*"
+        - PolicyName: SourceSqsPoller
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSReceiveFromSource
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !If
+                  - ShouldEnableSQSTrigger
+                  - !Sub "arn:aws:sqs:${AWS::Region}:${SourceAwsAccountId}:${SourceSqsQueueName}"
+                  - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:aws-sap-ecs-logserv-log-forwarder-dlq"
+        - PolicyName: DLQAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSDlqAccess
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt LogForwarderDLQ.Arn
+
+  # Main Lambda Function
+  LogForwarderFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: LogForwarderExecutionRole
+    Properties:
+      FunctionName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder"
+      Description: "AWS SAP LogServ log forwarder - filters and copies logs from staging to destination"
+      Handler: lambda_function.lambda_handler
+      CodeUri: lambda/aws_sap_ecs_log_forwarder/
+      ReservedConcurrentExecutions: !Ref ReservedConcurrency
+      Environment:
+        Variables:
+          DEST_BUCKET_NAME: !Ref DestBucketName
+          SOURCE_BUCKET_NAME: !Ref SourceBucketName
+          INCLUDE_CATEGORIES: !Ref IncludeCategories
+          EXCLUDE_SUBCATEGORIES: !Ref ExcludeSubcategories
+          DEST_PREFIX: !Ref DestPrefix
+          MAX_FILE_SIZE_MB: !Ref MaxFileSizeMB
+          LOG_LEVEL: !Ref LogLevel
+          DECOMPRESS: !Ref Decompress
+          EMIT_METRICS: !Ref EmitMetrics
+          ENVIRONMENT: !Ref Environment
+          FORWARD_AWS_LOGS: !Ref ForwardAWSLogs
+      Role: !GetAtt LogForwarderExecutionRole.Arn
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LogForwarderDLQ.Arn
+      Tags:
+        Project: aws-sap-ecs-logserv-log-forwarder
+        Environment: !Ref Environment
+
+  # SQS Event Source Mapping - conditionally created.
+  # On first deployment to a new account, set EnableSQSTrigger=false to skip this resource.
+  # CloudFormation's pre-deployment validation checks that the Lambda role can access the
+  # cross-account SQS queue, but on a brand-new stack the role doesn't exist yet.
+  # After the first deploy creates the role, redeploy with EnableSQSTrigger=true.
+  LogForwarderSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Condition: ShouldEnableSQSTrigger
+    DependsOn:
+      - LogForwarderExecutionRole
+      - LogForwarderFunction
+    Properties:
+      EventSourceArn: !Sub "arn:aws:sqs:${AWS::Region}:${SourceAwsAccountId}:${SourceSqsQueueName}"
+      FunctionName: !GetAtt LogForwarderFunction.Arn
+      BatchSize: !Ref BatchSize
+      MaximumBatchingWindowInSeconds: !Ref BatchWindow
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      Enabled: true
+
+  # CloudWatch Alarm - DLQ messages
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-dlq-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder-dlq"
+      AlarmDescription: "Messages in the LogServ forwarder DLQ"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt LogForwarderDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      OKActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      InsufficientDataActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+
+  # CloudWatch Alarm - Lambda errors
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-errors-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder-errors"
+      AlarmDescription: "LogServ forwarder Lambda errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LogForwarderFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      OKActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      InsufficientDataActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+
+  # CloudWatch Alarm - Lambda throttles
+  ThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !If
+        - HasEnvironment
+        - !Sub "aws-sap-ecs-logserv-log-forwarder-throttles-${Environment}"
+        - "aws-sap-ecs-logserv-log-forwarder-throttles"
+      AlarmDescription: "LogServ forwarder Lambda throttles"
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LogForwarderFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      OKActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+      InsufficientDataActions:
+        - !If [HasAlarmTopic, !Ref AlarmNotificationTopicArn, !Ref "AWS::NoValue"]
+
+Outputs:
+  LogForwarderFunctionArn:
+    Description: "Log Forwarder Lambda ARN"
+    Value: !GetAtt LogForwarderFunction.Arn
+
+  LogForwarderFunctionName:
+    Description: "Log Forwarder Lambda Name"
+    Value: !Ref LogForwarderFunction
+
+  DestBucketArn:
+    Condition: ShouldCreateBucket
+    Description: "Destination S3 Bucket ARN"
+    Value: !GetAtt LogServDestBucket.Arn
+
+  DestBucketNameOutput:
+    Condition: ShouldCreateBucket
+    Description: "Destination S3 Bucket Name"
+    Value: !Ref LogServDestBucket
+
+  DLQUrl:
+    Description: "Dead Letter Queue URL"
+    Value: !Ref LogForwarderDLQ
+
+  DLQArn:
+    Description: "Dead Letter Queue ARN"
+    Value: !GetAtt LogForwarderDLQ.Arn
+
+  SourceSqsArn:
+    Description: "Source SQS Queue ARN (auto-constructed)"
+    Value: !Sub "arn:aws:sqs:${AWS::Region}:${SourceAwsAccountId}:${SourceSqsQueueName}"

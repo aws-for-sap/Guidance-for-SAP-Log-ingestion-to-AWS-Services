@@ -1,0 +1,13 @@
+# Secrets / local environment config (never commit)
+secrets.json
+.env
+*.pem
+*.key
+
+# Temp / backup / OS
+*.log
+*.tmp
+*.bkp
+.$*.bkp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+# SAM build artifacts
+.aws-sam/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Local SAM config (never commit env-specific deploys)
+samconfig-*.toml
