@@ -201,7 +201,7 @@ Resources:
         - !Ref AWS::NoValue
       Tags:
         - Key: Project
-          Value: aws-sap-ecs-logserv-log-forwarder
+          Value: aws-sap-logserv-forwarder
         - Key: Environment
           Value: !Ref Environment
         - Key: Service
@@ -271,13 +271,13 @@ Resources:
     Properties:
       QueueName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-dlq-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder-dlq"
+        - !Sub "aws-sap-logserv-forwarder-dlq-${Environment}"
+        - "aws-sap-logserv-forwarder-dlq"
       MessageRetentionPeriod: 1209600
       KmsMasterKeyId: alias/aws/sqs
       Tags:
         - Key: Project
-          Value: aws-sap-ecs-logserv-log-forwarder
+          Value: aws-sap-logserv-forwarder
         - Key: Environment
           Value: !Ref Environment
 
@@ -288,8 +288,8 @@ Resources:
     Properties:
       RoleName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-role-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder-role"
+        - !Sub "aws-sap-logserv-forwarder-role-${Environment}"
+        - "aws-sap-logserv-forwarder-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -339,7 +339,7 @@ Resources:
                 Resource: !If
                   - ShouldEnableSQSTrigger
                   - !Sub "arn:aws:sqs:${AWS::Region}:${SourceAwsAccountId}:${SourceSqsQueueName}"
-                  - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:aws-sap-ecs-logserv-log-forwarder-dlq"
+                  - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:aws-sap-logserv-forwarder-dlq"
         - PolicyName: DLQAccess
           PolicyDocument:
             Version: "2012-10-17"
@@ -361,11 +361,11 @@ Resources:
     Properties:
       FunctionName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder"
+        - !Sub "aws-sap-logserv-forwarder-${Environment}"
+        - "aws-sap-logserv-forwarder"
       Description: "AWS SAP LogServ log forwarder - filters and copies logs from staging to destination"
       Handler: lambda_function.lambda_handler
-      CodeUri: lambda/aws_sap_ecs_log_forwarder/
+      CodeUri: lambda/aws_sap_logserv_forwarder/
       ReservedConcurrentExecutions: !Ref ReservedConcurrency
       Environment:
         Variables:
@@ -385,7 +385,7 @@ Resources:
         Type: SQS
         TargetArn: !GetAtt LogForwarderDLQ.Arn
       Tags:
-        Project: aws-sap-ecs-logserv-log-forwarder
+        Project: aws-sap-logserv-forwarder
         Environment: !Ref Environment
 
   # SQS Event Source Mapping - conditionally created.
@@ -414,8 +414,8 @@ Resources:
     Properties:
       AlarmName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-dlq-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder-dlq"
+        - !Sub "aws-sap-logserv-forwarder-dlq-${Environment}"
+        - "aws-sap-logserv-forwarder-dlq"
       AlarmDescription: "Messages in the LogServ forwarder DLQ"
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
@@ -441,8 +441,8 @@ Resources:
     Properties:
       AlarmName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-errors-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder-errors"
+        - !Sub "aws-sap-logserv-forwarder-errors-${Environment}"
+        - "aws-sap-logserv-forwarder-errors"
       AlarmDescription: "LogServ forwarder Lambda errors"
       Namespace: AWS/Lambda
       MetricName: Errors
@@ -468,8 +468,8 @@ Resources:
     Properties:
       AlarmName: !If
         - HasEnvironment
-        - !Sub "aws-sap-ecs-logserv-log-forwarder-throttles-${Environment}"
-        - "aws-sap-ecs-logserv-log-forwarder-throttles"
+        - !Sub "aws-sap-logserv-forwarder-throttles-${Environment}"
+        - "aws-sap-logserv-forwarder-throttles"
       AlarmDescription: "LogServ forwarder Lambda throttles"
       Namespace: AWS/Lambda
       MetricName: Throttles

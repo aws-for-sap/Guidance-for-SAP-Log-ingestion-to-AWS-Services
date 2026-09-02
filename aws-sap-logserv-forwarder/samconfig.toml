@@ -1,7 +1,7 @@
 version = 0.1
 
 [default.global.parameters]
-stack_name = "aws-sap-ecs-logserv-log-forwarder"
+stack_name = "aws-sap-logserv-forwarder"
 
 [default.build.parameters]
 cached = true

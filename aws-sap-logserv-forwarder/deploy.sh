@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# AWS SAP ECS LogServ Log Forwarder - Deployment Script
+# AWS SAP LogServ Log Forwarder - Deployment Script
 # =============================================================================
 # Handles the two-step deployment required for fresh (first-time) deployments
 # to new AWS accounts. On subsequent updates, a single deploy is sufficient.

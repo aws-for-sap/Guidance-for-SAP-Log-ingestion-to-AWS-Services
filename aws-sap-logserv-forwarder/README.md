@@ -173,7 +173,7 @@ sam deploy --region <region> --profile <aws-profile>
 
 Replace `<region>` with the target AWS region (e.g. `us-east-1`) and `<aws-profile>` with your configured AWS CLI profile name. These values are saved to `samconfig.toml` after the first guided deploy, so subsequent runs only need `sam deploy`.
 
-The CloudFormation stack name can be set in `samconfig.toml` under `stack_name`. Convention is `aws-sap-ecs-logserv-log-forwarder-<environment>` (e.g. `aws-sap-ecs-logserv-log-forwarder-test`).
+The CloudFormation stack name can be set in `samconfig.toml` under `stack_name`. Convention is `aws-sap-logserv-forwarder-<environment>` (e.g. `aws-sap-logserv-forwarder-test`).
 
 To use a specific config file:
 ```bash
@@ -404,10 +404,57 @@ If none of these conditions are met, Lambda remains the more cost-effective opti
 |---------|-------------|
 | **Encryption at rest (S3)** | Destination bucket uses AES-256 server-side encryption (SSE-S3) by default. |
 | **Encryption at rest (SQS)** | Dead Letter Queue uses SQS-managed server-side encryption (SSE-SQS). |
+| **Key management (SSE-KMS)** | *Known limitation.* The template does not expose a parameter for SSE-KMS with a customer-managed key (CMK). See [Using a customer-managed KMS key](#using-a-customer-managed-kms-key) below if your compliance framework requires one. |
+| **Network (VPC)** | The Lambda runs outside a VPC and reaches the cross-account SQS queue and S3 buckets over public AWS service endpoints (TLS 1.2+). See [Running the Lambda in a VPC](#running-the-lambda-in-a-vpc) below if private networking is required. |
 | **Versioning** | Destination bucket has versioning enabled for object recovery and auditability. |
 | **Encryption in transit** | Bucket policy enforces TLS 1.2+ and denies insecure transport. |
 | **Public access blocked** | All four S3 public access block settings are enabled. |
 | **Access logging** | Optional. When `AccessLogBucketName` is provided, S3 server access logging records all requests to the destination bucket. See [Enabling S3 Access Logging](#enabling-s3-access-logging). |
+
+#### Using a customer-managed KMS key
+
+The destination bucket is encrypted with SSE-S3 (`AES256`), hardcoded in the `LogServDestBucket` resource in `template.yaml`. There is no parameter to switch it to SSE-KMS, and the dead-letter queue uses the AWS-managed `alias/aws/sqs` key rather than a customer-managed key.
+
+If your compliance framework (for example SOX, GDPR, or an industry-specific regime) requires a customer-managed KMS key, you have two options:
+
+1. **Modify the template.** Change the destination bucket's `BucketEncryption` to use `aws:kms` and reference your key:
+   ```yaml
+   BucketEncryption:
+     ServerSideEncryptionConfiguration:
+       - ServerSideEncryptionByDefault:
+           SSEAlgorithm: aws:kms
+           KMSMasterKeyID: <your-kms-key-arn>
+         BucketKeyEnabled: true
+   ```
+2. **Bring your own bucket.** Set `CreateDestBucket=false` and point the forwarder at an existing bucket that already has an SSE-KMS default encryption rule.
+
+In **both** cases you must extend the `LogForwarderExecutionRole` (in `template.yaml`) with permission on your key, because the reference role does not grant any KMS actions:
+
+```yaml
+- PolicyName: DestKmsAccess
+  PolicyDocument:
+    Version: "2012-10-17"
+    Statement:
+      - Effect: Allow
+        Action:
+          - kms:GenerateDataKey
+          - kms:Decrypt
+        Resource: <your-kms-key-arn>
+```
+
+If cross-account principals (`AllowedPrincipalArns`) read the objects, grant them usage of the same key through the key policy as well.
+
+#### Running the Lambda in a VPC
+
+By default the forwarder Lambda function is **not** attached to a VPC (there is no `VpcConfig` in `template.yaml`). It communicates only with Amazon SQS and Amazon S3 over public AWS service endpoints, secured with TLS 1.2+, and requires no access to private VPC resources. Running outside a VPC is the recommended posture for this workload: it avoids elastic network interface (ENI) cold-start latency and does not consume subnet IP addresses.
+
+Attach the function to a VPC only if your security posture requires AWS API traffic to stay on private networking. If you do, you must also:
+
+- Add a `VpcConfig` (subnets and a security group) to the `LogForwarderFunction` resource.
+- Provide an **Amazon S3 gateway VPC endpoint** and an **Amazon SQS interface VPC endpoint** in those subnets, so the function can reach the source queue and both buckets without internet egress.
+- Ensure the subnets have sufficient free IP addresses for the function's peak concurrency.
+
+The reference template does not configure any of this.
 
 ### Monitoring & Alerting
 
