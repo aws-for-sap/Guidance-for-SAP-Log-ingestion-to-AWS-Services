@@ -81,6 +81,9 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 DECOMPRESS = os.environ.get("DECOMPRESS", "true").lower() == "true"
 EMIT_METRICS = os.environ.get("EMIT_METRICS", "false").lower() == "true"
 FORWARD_AWS_LOGS = os.environ.get("FORWARD_AWS_LOGS", "true").lower() == "true"
+# When true, forward SAP-managed firewall (FWaaS) logs from the fwaas/ prefix,
+# e.g. fwaas/<subcategory>/<hec-id>/YYYY/MM/DD/fwaas-<id>.json.gz -> logserv/fwaas/<subcategory>/...
+FORWARD_FWAAS_LOGS = os.environ.get("FORWARD_FWAAS_LOGS", "true").lower() == "true"
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "prod")
 # When true, skip upload if the destination object already exists (idempotency
 # on SQS redelivery). See threat T14.
@@ -188,9 +191,10 @@ def _safe_decompress(compressed_data, max_bytes):
 # --- S3 Key Validation ---
 # Matches expected LogServ paths: logserv/<category>/<subcategory>/.../<filename>
 # or AWSLogs/<account-id>/... paths
+# or fwaas/<subcategory>/... paths (SAP-managed firewall logs)
 # Rejects: path traversal (../), null bytes, control characters, backslashes
 _VALID_LOGSERV_KEY_RE = re.compile(
-    r"^(logserv/[a-z0-9_]+/[a-z0-9_]+/.+|AWSLogs/\d{12}/.+)$",
+    r"^(logserv/[a-z0-9_]+/[a-z0-9_]+/.+|AWSLogs/\d{12}/.+|fwaas/[a-z0-9_]+/.+)$",
     re.IGNORECASE,
 )
 _DANGEROUS_PATTERNS_RE = re.compile(r"(\.\./|\\|[\x00-\x1f])")
@@ -420,6 +424,11 @@ def passes_filter(key):
     # Allow AWSLogs prefix through (VPC flow logs, ELB logs and WAF logs)
     if key.startswith("AWSLogs/"):
         return FORWARD_AWS_LOGS
+
+    # Allow fwaas prefix through (SAP-managed firewall logs). Category filters
+    # do not apply; the destination key becomes logserv/fwaas/<sub>/...
+    if key.startswith("fwaas/"):
+        return FORWARD_FWAAS_LOGS
 
     # Must contain 'logserv' in path (relevance check)
     if "logserv" not in key.lower():

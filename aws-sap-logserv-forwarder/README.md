@@ -71,6 +71,18 @@ In addition to SAP application logs, the source CLZ bucket delivers AWS infrastr
 
 These logs originate from the SAP RISE managed account and provide network, load balancer, and web application firewall visibility for the SAP landscape infrastructure.
 
+### SAP-Managed Firewall Logs (fwaas)
+
+The source CLZ bucket can also deliver SAP-managed firewall (FWaaS) logs under the `fwaas/` prefix. Like `AWSLogs/`, these are passed through without category filtering. They are decompressed and stored under `<DEST_PREFIX>/fwaas/` in the destination bucket.
+
+| Log Type | S3 Path Pattern | Format |
+|----------|----------------|--------|
+| SAP-managed firewall (FWaaS) logs | `fwaas/<subcategory>/<hec-id>/<year>/<month>/<day>/fwaas-<id>.json.gz` | JSON (gzip-compressed) |
+
+Example: `fwaas/<subcategory>/<hec-id>/<year>/<month>/<day>/fwaas-<id>.json.gz` → `logserv/fwaas/<subcategory>/<hec-id>/<year>/<month>/<day>/fwaas-<id>.json`.
+
+> **Note:** The forwarder only sees fwaas objects when the source bucket's S3 event notifications publish the `fwaas/` prefix to the source SQS queue. If no fwaas files arrive even though the objects exist in the bucket, ask SAP to include `fwaas/` in the bucket's notification configuration.
+
 ### Filtering
 
 Log forwarding can be controlled using two parameters:
@@ -87,7 +99,7 @@ Log forwarding can be controlled using two parameters:
 
 Filters are applied to the S3 key path structure: `logserv/<category>/<subcategory>/...`
 
-**Note:** AWS infrastructure logs (`AWSLogs/` prefix) bypass category filtering when `ForwardAWSLogs` is `true` (default). Set to `false` to exclude them entirely.
+**Note:** AWS infrastructure logs (`AWSLogs/` prefix) bypass category filtering when `ForwardAWSLogs` is `true` (default). Set to `false` to exclude them entirely. SAP-managed firewall logs (`fwaas/` prefix) work the same way under `ForwardFwaasLogs` (default `true`).
 
 ## Deployment
 
@@ -187,7 +199,7 @@ sam deploy --config-file samconfig-test.toml
 | `Environment` | No | *(blank)* | Environment suffix appended to resource names (e.g. `dev`, `prod`). Leave blank for no suffix. |
 | `DestBucketName` | **Yes** | | Destination S3 bucket name for processed logs. |
 | `SourceBucketName` | **Yes** | | Source S3 bucket name (the CLZ staging bucket). Also acts as an allowlist: events naming a different bucket are rejected before the object is read. Additional buckets can be permitted via the `SOURCE_BUCKET_ALLOWLIST` environment variable. |
-| `SourceSqsQueueName` | **Yes** | | SQS queue name (as provided by SAP). The full ARN is constructed automatically using this name, the `SourceAwsAccountId`, and the deployment region. Example: `sap-hec-clz-123456789012-us-east-1-hec45-gto-queue` |
+| `SourceSqsQueueName` | **Yes** | | SQS queue name (as provided by SAP). The full ARN is constructed automatically using this name, the `SourceAwsAccountId`, and the deployment region. Example: `sap-hec-clz-123456789012-us-east-1-hec99-xyz-queue` |
 | `SourceAwsAccountId` | **Yes** | | AWS account ID of the SAP RISE managed account that owns the source SQS queue and S3 bucket. Typically embedded in the bucket/queue name (e.g. `123456789012`). |
 | `IncludeCategories` | No | all | Comma-separated log categories to include. Leave blank to forward all categories (no filtering). When specified, only listed categories are forwarded — unlisted categories are silently dropped. Options: `abap`, `dns`, `hana`, `linux`, `sap`, `scc`, `webdispatcher`. |
 | `ExcludeSubcategories` | No | *(none)* | Comma-separated subcategories to exclude (e.g. `audit`, `proxy`, `slapd`). |
@@ -196,6 +208,7 @@ sam deploy --config-file samconfig-test.toml
 | `Decompress` | No | `true` | Decompress `.gz` files before storing in destination. |
 | `LogLevel` | No | `INFO` | Lambda logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 | `ForwardAWSLogs` | No | `true` | Forward AWS infrastructure logs (VPC Flow Logs, ELB Access Logs, WAF Logs) from the `AWSLogs/` prefix. Set to `false` to skip. |
+| `ForwardFwaasLogs` | No | `true` | Forward SAP-managed firewall (FWaaS) logs from the `fwaas/` prefix, written to `<DEST_PREFIX>fwaas/...`. Set to `false` to skip. |
 | `BatchSize` | No | `10` | Number of SQS messages per Lambda invocation. Range: 1–10,000. Recommended: 10. Higher values increase per-invocation duration and memory pressure. Values above 100 risk Lambda timeouts (5 min limit) when processing large files. |
 | `BatchWindow` | No | `5` | Maximum batching window in seconds. Range: 0–300. Set to 0 for immediate processing (no batching). Higher values reduce invocations but increase delivery latency. |
 | `ReservedConcurrency` | No | `50` | Reserved concurrent Lambda executions. Recommended: 10–100. Setting above 500 may starve other Lambda functions in the account (default account limit is 1,000 unreserved concurrency). Setting below 5 may cause SQS message backlog during bursts. Must not exceed your account's unreserved concurrency quota. |
@@ -282,7 +295,7 @@ Access logs will be written to `s3://my-logserv-access-logs/<dest-bucket-name>-a
 
 9. **Streaming decompression with size limit** — Prevents decompression bomb attacks. Files are decompressed in 64KB chunks with a configurable ceiling (`MAX_DECOMPRESSED_SIZE_MB`, default 500MB). Files exceeding the limit are rejected with a `DecompressionBombError`.
 
-10. **S3 key path validation** — All incoming S3 keys are validated against expected LogServ path patterns (`logserv/<category>/<subcategory>/...` or `AWSLogs/<account-id>/...`). Keys containing path traversal sequences (`../`), backslashes, or control characters are rejected before any S3 API call is made.
+10. **S3 key path validation** — All incoming S3 keys are validated against expected LogServ path patterns (`logserv/<category>/<subcategory>/...`, `AWSLogs/<account-id>/...` or `fwaas/<subcategory>/...`). Keys containing path traversal sequences (`../`), backslashes, or control characters are rejected before any S3 API call is made.
 
 11. **Strict message parsing** — Only standard S3 event notification format (with `Records[].s3.bucket.name` and `Records[].s3.object.key`) is accepted. Non-standard message formats are logged as warnings and skipped.
 
@@ -382,7 +395,7 @@ If none of these conditions are met, Lambda remains the more cost-effective opti
 
 | Control | Description |
 |---------|-------------|
-| **S3 key format validation** | All S3 keys are validated against expected path patterns before processing. Keys must match `logserv/<category>/<subcategory>/...` or `AWSLogs/<account-id>/...`. Path traversal (`../`), backslashes, and control characters are rejected. |
+| **S3 key format validation** | All S3 keys are validated against expected path patterns before processing. Keys must match `logserv/<category>/<subcategory>/...`, `AWSLogs/<account-id>/...` or `fwaas/<subcategory>/...`. Path traversal (`../`), backslashes, and control characters are rejected. |
 | **Strict message parsing** | Only standard S3 event notification format is accepted. The Lambda does not process arbitrary JSON payloads — messages must contain valid `Records[].s3.bucket.name` and `Records[].s3.object.key` structures. |
 | **Source bucket pinning** | The bucket named in the S3 event is checked against an allowlist (`SOURCE_BUCKET_NAME` plus `SOURCE_BUCKET_ALLOWLIST`) before the object is read. Events naming any other bucket are rejected. Disabled if the allowlist is empty (a warning is logged at cold start). |
 | **File size limit** | Files exceeding `MaxFileSizeMB` (default 50MB) are rejected. The limit is enforced against the object's real `ContentLength` before the body is read into memory; the event-reported size is used only as an advisory pre-filter. |

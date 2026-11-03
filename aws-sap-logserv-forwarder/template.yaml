@@ -26,7 +26,7 @@ Parameters:
     Default: ""
     Description: >
       Name of the source SQS queue (as provided by SAP).
-      Example: sap-hec-clz-123456789012-us-east-1-hec45-gto-queue
+      Example: sap-hec-clz-123456789012-us-east-1-hec99-xyz-queue
 
   SourceAwsAccountId:
     Type: String
@@ -76,6 +76,12 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: Whether to forward AWS infrastructure logs (VPC Flow Logs, ELB, WAF) from the AWSLogs/ prefix
+
+  ForwardFwaasLogs:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to forward SAP-managed firewall (FWaaS) logs from the fwaas/ prefix (written to logserv/fwaas/...)
 
   BatchSize:
     Type: Number
@@ -380,6 +386,7 @@ Resources:
           EMIT_METRICS: !Ref EmitMetrics
           ENVIRONMENT: !Ref Environment
           FORWARD_AWS_LOGS: !Ref ForwardAWSLogs
+          FORWARD_FWAAS_LOGS: !Ref ForwardFwaasLogs
       Role: !GetAtt LogForwarderExecutionRole.Arn
       DeadLetterQueue:
         Type: SQS
