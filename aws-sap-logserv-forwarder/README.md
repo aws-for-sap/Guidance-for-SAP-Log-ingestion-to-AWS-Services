@@ -522,6 +522,8 @@ The **`_raw` field** contains the original log line content exactly as written b
 
 Estimated monthly costs for a typical SAP RISE landscape (single SID, ~27 log subcategories, ~20GB/day raw log volume):
 
+Prices are AWS list prices for US East (N. Virginia) from the AWS Price List API, effective 2026-10-01: S3 Standard $0.023, S3 Standard-IA and the Intelligent-Tiering Infrequent Access tier $0.0125, and S3 Glacier Flexible Retrieval $0.0036 per GB-month (first 50 TB); S3 PUT requests $0.005 per 1,000. All figures are estimates. Prices vary by Region and change over time; check [Amazon S3 pricing](https://aws.amazon.com/s3/pricing/) before you plan a budget.
+
 ### Lambda
 
 | Component | Estimate | Basis |
@@ -534,11 +536,11 @@ Estimated monthly costs for a typical SAP RISE landscape (single SID, ~27 log su
 
 | Component | Estimate | Basis |
 |-----------|----------|-------|
-| Storage (Standard) | ~$14 | ~600GB/month (decompressed, before lifecycle transitions) |
-| Storage (Intelligent-Tiering) | ~$5–8 | After 30-day transition for older logs |
-| PUT requests | ~$3 | ~750K PUT requests/month |
+| Storage, first month | ~$14 | ~600GB in S3 Standard × $0.023 per GB-month |
+| Storage, steady state | ~$96 | 365-day retention holds ~7.2TB: the newest ~600GB at $0.023, the rest in the Intelligent-Tiering Infrequent Access tier at $0.0125 per GB-month (plus the monitoring fee) |
+| PUT requests | ~$4 | ~750K PUT requests/month × $0.005 per 1,000 |
 | GET requests | Varies | Depends on downstream consumption (Athena, OpenSearch, etc.) |
-| **S3 total** | **~$20–25/month** | With 365-day retention |
+| **S3 total** | **~$18 in the first month, ~$100/month at steady state** | Storage grows each month until the oldest logs reach the 365-day expiry |
 
 ### CloudWatch
 
@@ -557,10 +559,10 @@ Estimated monthly costs for a typical SAP RISE landscape (single SID, ~27 log su
 
 ### Total Estimated Cost
 
-| Scenario | Monthly Estimate |
-|----------|-----------------|
-| Metrics disabled | **~$25–40/month** |
-| Metrics enabled | **~$40–60/month** |
+| Scenario | First month | Steady state (365-day retention) |
+|----------|-------------|----------------------------------|
+| Metrics disabled | **~$27–39** | **~$110–120/month** |
+| Metrics enabled | **~$40–55** | **~$125–135/month** |
 
 *Costs scale linearly with log volume. For multi-SID landscapes, multiply by the number of active SIDs. Actual costs depend on region, data volume, and access patterns. Use the [AWS Pricing Calculator](https://calculator.aws/) for precise estimates.*
 
@@ -570,12 +572,14 @@ The default lifecycle configuration transitions objects to S3 Intelligent-Tierin
 
 ### Recommended Storage Strategies
 
-| Strategy | Best For | Configuration | Savings vs Standard |
+| Strategy | Best For | Configuration | Storage savings vs Standard (estimate) |
 |----------|----------|--------------|---------------------|
-| **Default (Intelligent-Tiering)** | Unknown or mixed access patterns | Included in template (30-day transition) | ~40% on older data |
-| **S3 Standard-IA (immediate)** | Logs ingested into SIEM/analytics on arrival, rarely re-read from S3 | Transition to IA at 0 days | ~40% from day 1 |
-| **S3 Standard-IA (delayed)** | Logs queried directly from S3 for first few days, then idle | Transition to IA after 7–14 days | ~40% after transition |
-| **S3 Standard-IA + Glacier** | Long-term compliance retention | IA at 0–14 days, Glacier at 90 days | ~70–80% on archived data |
+| **Default (Intelligent-Tiering)** | Unknown or mixed access patterns | Included in template (30-day transition) | ~46% on objects not accessed for 30 days ($0.0125 vs $0.023 per GB-month) |
+| **S3 Standard-IA (immediate)** | Logs ingested into SIEM/analytics on arrival, rarely re-read from S3 | Transition to IA at 0 days | ~46% from day 1 |
+| **S3 Standard-IA (delayed)** | Logs queried directly from S3 for first few days, then idle | Transition to IA after 7–14 days | ~46% after transition |
+| **S3 Standard-IA + Glacier** | Long-term compliance retention | IA at 0–14 days, Glacier at 90 days | ~84% on data in S3 Glacier Flexible Retrieval ($0.0036 vs $0.023 per GB-month) |
+
+Savings compare storage prices only, using the list prices given under [Cost Estimate](#cost-estimate). They exclude request, lifecycle transition, retrieval and Intelligent-Tiering monitoring charges, and the minimum storage duration and minimum object size charges of S3 Standard-IA and S3 Glacier Flexible Retrieval.
 
 ### When to Use S3 Standard-IA
 
@@ -629,15 +633,17 @@ LifecycleConfiguration:
     #       TransitionInDays: 90
 ```
 
-### Cost Comparison (600GB/month, 365-day retention)
+### Cost Comparison (600GB/month ingest, 365-day retention, steady state)
 
 | Storage Class | Monthly Cost | Notes |
 |--------------|-------------|-------|
-| Standard (all data) | ~$14 | No lifecycle transitions |
-| Intelligent-Tiering (default) | ~$8–10 | Auto-tiers after 30 days; monitoring fee applies |
-| Standard-IA from day 0 | ~$5–6 | Best for write-once-read-rarely; no monitoring fee |
-| Standard (7d) → IA (358d) | ~$6–7 | Brief Standard period for immediate queries |
-| Standard-IA (0d) → Glacier (90d) | ~$3–4 | Maximum savings; Glacier retrieval takes minutes–hours |
+| Standard (all data) | ~$166 | ~7.2TB × $0.023; no lifecycle transitions |
+| Intelligent-Tiering (default) | ~$96 + monitoring fee | Newest ~600GB at $0.023, the rest at $0.0125; auto-tiers after 30 days |
+| Standard-IA from day 0 | ~$90 | ~7.2TB × $0.0125; best for write-once-read-rarely; no monitoring fee |
+| Standard (7d) → IA (358d) | ~$92 | ~140GB at $0.023, the rest at $0.0125; brief Standard period for immediate queries |
+| Standard-IA (0d) → Glacier (90d) | ~$42 | ~1.8TB at $0.0125 and ~5.4TB at $0.0036; maximum savings; Glacier retrieval takes minutes–hours |
+
+Steady state is the monthly storage bill once 365 days of logs are held. Figures cover storage only and use the list prices given under [Cost Estimate](#cost-estimate).
 
 ## Notices
 
